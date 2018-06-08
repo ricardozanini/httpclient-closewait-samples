@@ -8,6 +8,7 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.apache.http.HeaderElement;
 import org.apache.http.HeaderElementIterator;
 import org.apache.http.HttpResponse;
@@ -37,57 +38,73 @@ public final class Main {
     private final static int ONEMILLI = 1000;
     private final static int TIMEOUT_SECONDS = 1;
     private final static int THREADS = 15;
-    private final static int WAIT_SECS = 120;
+    private final static int WAIT_SECS = 60;
 
     public Main() {
     }
 
     public static void main(String[] args) {
         LOGGER.info("Starting HttpClient sample");
-        HttpGet get = new HttpGet("http://hc.apache.org");
-        ExecutorService executorService = Executors.newFixedThreadPool(THREADS);
         PoolingHttpClientConnectionManager connManager = new PoolingHttpClientConnectionManager();
         connManager.setDefaultMaxPerRoute(5);
         connManager.setMaxTotal(5);
 
         try (CloseableHttpClient client = HttpClients.custom().setConnectionManager(connManager).setKeepAliveStrategy(createConnectionKeepAliveStrategy()).build()) {
-            ExecutorCompletionService<Void> completionService = new ExecutorCompletionService<Void>(executorService);
-            List<Future<Void>> futures = new ArrayList<Future<Void>>();
-
-            LOGGER.info("Starting all threads: {}", THREADS);
-            for (int i = 0; i < THREADS; i++) {
-                futures.add(completionService.submit(new MultiHttpClientConnRunnable(client, get)));
-            }
-
-            int completed = 0;
-            LOGGER.info("Waiting for all requests to be completed");
-            while (completed < THREADS) {
-                for (int i = 0; i < futures.size(); i++) {
-                    if (futures.get(i).isDone()) {
-                        completed++;
-                        LOGGER.info("Request is done. Completed: {}", completed);
-                        futures.remove(i);
-                        if (completed == THREADS) {
-                            LOGGER.info("End of all requests...");
-                        }
-                        break;
-                    }
-                }
-            }
+            performRequests(connManager, client);
             // if you add a Thread.sleep in here, the connections eventually will be on "CLOSE_WAIT" state b/c the server would close the connection with us after the Keep-Alive timeout.
+            sleep();
+            LOGGER.info("Stats of the connections after all requests been made and not closing the client: {}", connManager.getTotalStats());
+            LOGGER.info("Trying to close those idle connections");
+            connManager.closeExpiredConnections();
+            connManager.closeIdleConnections(5, TimeUnit.SECONDS);
+            sleep();
+            LOGGER.info("Let's perform more requests");
+            performRequests(connManager, client);
+            sleep();
+            LOGGER.info("Finishing, closing everything");
         } catch (IOException e) {
             LOGGER.error("Error during checking for performing client connections", e);
-        } finally {
-            LOGGER.info("Sleeping a little bit to see what happened to the connections");
-            try {
-                Thread.sleep(ONEMILLI * WAIT_SECS);
-            } catch (InterruptedException e) {
-                LOGGER.error("Error during checking for completed requests", e);
-            }
-            connManager.close();
-            executorService.shutdown();
         }
 
+        connManager.close();
+    }
+
+    private static void sleep() {
+        LOGGER.info("Sleeping a little bit to see what happened to the connections");
+        try {
+            Thread.sleep(ONEMILLI * WAIT_SECS);
+        } catch (InterruptedException e) {
+            LOGGER.error("Error during checking for completed requests", e);
+        }
+    }
+
+    private static void performRequests(PoolingHttpClientConnectionManager connManager, CloseableHttpClient client) {
+        HttpGet get = new HttpGet("http://hc.apache.org");
+        ExecutorService executorService = Executors.newFixedThreadPool(THREADS);
+        ExecutorCompletionService<Void> completionService = new ExecutorCompletionService<Void>(executorService);
+        List<Future<Void>> futures = new ArrayList<Future<Void>>();
+
+        LOGGER.info("Starting all threads: {}", THREADS);
+        for (int i = 0; i < THREADS; i++) {
+            futures.add(completionService.submit(new MultiHttpClientConnRunnable(client, get)));
+        }
+
+        int completed = 0;
+        LOGGER.info("Waiting for all requests to be completed");
+        while (completed < THREADS) {
+            for (int i = 0; i < futures.size(); i++) {
+                if (futures.get(i).isDone()) {
+                    completed++;
+                    LOGGER.info("Request is done. Completed: {}", completed);
+                    futures.remove(i);
+                    if (completed == THREADS) {
+                        LOGGER.info("End of all requests...");
+                    }
+                    break;
+                }
+            }
+        }
+        executorService.shutdown();
     }
 
     private static ConnectionKeepAliveStrategy createConnectionKeepAliveStrategy() {
